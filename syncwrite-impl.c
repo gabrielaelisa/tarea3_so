@@ -45,7 +45,7 @@ module_exit(syncwrite_exit);
 
 /* Global variables of the driver */
 
-int syncread_major = 61;     /* Major number */
+int syncwrite_major = 61;     /* Major number */
 
 /* Buffer to store data */
 #define MAX_SIZE 8192
@@ -56,50 +56,179 @@ static char *syncwrite_buffer;
 static ssize_t curr_size;
 static int readers;
 static int writing;
-static int pend_open_write;
 
-/* El mutex y la condicion para syncread */
+/* El mutex y la noreadericion para syncwrite */
 static KMutex mutex;
-static KCondition cond;
+// todos los escritores esperan un lector
+static Knoreaderition noreader;
 
 int syncwrite_init(void) {
   int rc;
 
   /* Registering device */
-  rc = register_chrdev(syncread_major, "syncread", &syncwrite_fops);
+  rc = register_chrdev(syncwrite_major, "syncwrite", &syncwrite_fops);
   if (rc < 0) {
     printk(
-      "<1>syncread: cannot obtain major number %d\n", syncwrite_major);
+      "<1>syncwrite: cannot obtain major number %d\n", syncwrite_major);
     return rc;
   }
 
-  readers= 0;
-  writing= FALSE;
-  pend_open_write= 0;
+  readers= FALSE;
+  writing= 0;
   curr_size= 0;
   m_init(&mutex);
-  c_init(&cond);
+  c_init(&noreader);
 
-  /* Allocating syncread_buffer */
+  /* Allocating syncwrite_buffer */
   syncwrite_buffer = kmalloc(MAX_SIZE, GFP_KERNEL);
   if (syncwrite_buffer==NULL) {
-    syncread_exit();
+    syncwrite_exit();
     return -ENOMEM;
   }
   memset(syncwrite_buffer, 0, MAX_SIZE);
 
-  printk("<1>Inserting syncread module\n");
+  printk("<1>Inserting syncwrite module\n");
   return 0;
 }
 
 void syncwrite_exit(void) {
   /* Freeing the major number */
-  unregister_chrdev(syncwrite_major, "syncread");
+  unregister_chrdev(syncwrite_major, "syncwrite");
 
-  /* Freeing buffer syncread */
+  /* Freeing buffer syncwrite */
   if (syncwrite_buffer) {
     kfree(syncwrite_buffer);
   }
 
-  printk("<1>Removing syncread module\n");
+  printk("<1>Removing syncwrite module\n");
 }
+
+
+int syncwrite_open(struct inode *inode, struct file *filp) {
+  int rc= 0;
+  m_lock(&mutex);
+
+  // minor number
+  int minor= iminor(filp->f_path.dentry->d_inode)
+  // escritura
+  if (filp->f_mode & FMODE_WRITE) {
+    int rc;
+    printk("<1>open request for write\n");
+    /* Se debe esperar hasta que no hayan otros lectores o escritores */
+    while (!readers) {
+      // si hay control-c entro al error
+      if (c_wait(&noreader, &<mutex)) {
+        rc= -EINTR;
+        goto epilog;
+      }
+    }
+    writing= TRUE;
+    curr_size= 0;
+    printk("<1>open for write successful\n");
+  }
+
+  // lectura
+  else if (filp->f_mode & FMODE_READ) {
+
+    while (!writing && pend_open_write>0) {
+      if (c_wait(&noreader, &mutex)) {
+        rc= -EINTR;
+        goto epilog;
+      }
+    }
+    readers++;
+    printk("<1>open for read\n");
+  }
+
+epilog:
+  m_unlock(&mutex);
+  return rc;
+}
+
+int syncwrite_release(struct inode *inode, struct file *filp) {
+  m_lock(&mutex);
+
+  if (filp->f_mode & FMODE_WRITE) {
+    writing= FALSE;
+    c_broadcast(&noreader);
+    printk("<1>close for write successful\n");
+  }
+  else if (filp->f_mode & FMODE_READ) {
+    readers--;
+    if (readers==0)
+      c_broadcast(&noreader);
+    printk("<1>close for read (readers remaining=%d)\n", readers);
+  }
+
+  m_unlock(&mutex);
+  return 0;
+}
+
+// esta parte hay que editar y cambiar
+ssize_t syncread_read(struct file *filp, char *buf,
+                    size_t count, loff_t *f_pos) {
+  ssize_t rc;
+  m_lock(&mutex);
+
+  while (curr_size <= *f_pos && writing) {
+    /* si el lector esta en el final del archivo pero hay un proceso
+     * escribiendo todavia en el archivo, el lector espera.
+     */
+    if (c_wait(&noreader, &mutex)) {
+      printk("<1>read interrupted\n");
+      rc= -EINTR;
+      goto epilog;
+    }
+  }
+
+  if (count > curr_size-*f_pos) {
+    count= curr_size-*f_pos;
+  }
+
+  printk("<1>read %d bytes at %d\n", (int)count, (int)*f_pos);
+
+  /* Transfiriendo datos hacia el espacio del usuario */
+  if (copy_to_user(buf, syncread_buffer+*f_pos, count)!=0) {
+    /* el valor de buf es una direccion invalida */
+    rc= -EFAULT;
+    goto epilog;
+  }
+
+  *f_pos+= count;
+  rc= count;
+
+epilog:
+  m_unlock(&mutex);
+  return rc;
+}
+
+ssize_t syncread_write( struct file *filp, const char *buf,
+                      size_t count, loff_t *f_pos) {
+  ssize_t rc;
+  loff_t last;
+
+  m_lock(&mutex);
+
+  last= *f_pos + count;
+  if (last>MAX_SIZE) {
+    count -= last-MAX_SIZE;
+  }
+  printk("<1>write %d bytes at %d\n", (int)count, (int)*f_pos);
+
+  /* Transfiriendo datos desde el espacio del usuario */
+  if (copy_from_user(syncread_buffer+*f_pos, buf, count)!=0) {
+    /* el valor de buf es una direccion invalida */
+    rc= -EFAULT;
+    goto epilog;
+  }
+
+  *f_pos += count;
+  curr_size= *f_pos;
+  rc= count;
+  c_broadcast(&noreader);
+
+epilog:
+  m_unlock(&mutex);
+  return rc;
+}
+
