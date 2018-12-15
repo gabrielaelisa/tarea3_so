@@ -108,36 +108,37 @@ int syncwrite_open(struct inode *inode, struct file *filp) {
   int rc= 0;
   m_lock(&mutex);
 
-  // minor number
-  int minor= iminor(filp->f_path.dentry->d_inode)
   // escritura
   if (filp->f_mode & FMODE_WRITE) {
     int rc;
+
+    /*
     printk("<1>open request for write\n");
-    /* Se debe esperar hasta que no hayan otros lectores o escritores */
+    /* Se debe esperar hasta que no hayan otros lectores o escritores 
     while (!readers) {
       // si hay control-c entro al error
       if (c_wait(&noreader, &<mutex)) {
         rc= -EINTR;
         goto epilog;
       }
-    }
-    writing= TRUE;
+    }*/
+    writing+= 1;
     curr_size= 0;
     printk("<1>open for write successful\n");
   }
 
   // lectura
   else if (filp->f_mode & FMODE_READ) {
-
-    while (!writing && pend_open_write>0) {
-      if (c_wait(&noreader, &mutex)) {
-        rc= -EINTR;
-        goto epilog;
-      }
+    if writing==0
+    {
+      rc= -EINTR;
+      goto epilog;
     }
-    readers++;
+
+    readers= TRUE;
+    c_broadcast(&noreader);
     printk("<1>open for read\n");
+    
   }
 
 epilog:
@@ -149,14 +150,11 @@ int syncwrite_release(struct inode *inode, struct file *filp) {
   m_lock(&mutex);
 
   if (filp->f_mode & FMODE_WRITE) {
-    writing= FALSE;
-    c_broadcast(&noreader);
+    writing-=1;
     printk("<1>close for write successful\n");
   }
   else if (filp->f_mode & FMODE_READ) {
-    readers--;
-    if (readers==0)
-      c_broadcast(&noreader);
+    readers= FALSE;
     printk("<1>close for read (readers remaining=%d)\n", readers);
   }
 
@@ -169,17 +167,6 @@ ssize_t syncread_read(struct file *filp, char *buf,
                     size_t count, loff_t *f_pos) {
   ssize_t rc;
   m_lock(&mutex);
-
-  while (curr_size <= *f_pos && writing) {
-    /* si el lector esta en el final del archivo pero hay un proceso
-     * escribiendo todavia en el archivo, el lector espera.
-     */
-    if (c_wait(&noreader, &mutex)) {
-      printk("<1>read interrupted\n");
-      rc= -EINTR;
-      goto epilog;
-    }
-  }
 
   if (count > curr_size-*f_pos) {
     count= curr_size-*f_pos;
@@ -204,6 +191,9 @@ epilog:
 
 ssize_t syncread_write( struct file *filp, const char *buf,
                       size_t count, loff_t *f_pos) {
+  
+  // minor number
+  int minor= iminor(filp->f_path.dentry->d_inode)
   ssize_t rc;
   loff_t last;
 
@@ -225,7 +215,14 @@ ssize_t syncread_write( struct file *filp, const char *buf,
   *f_pos += count;
   curr_size= *f_pos;
   rc= count;
-  c_broadcast(&noreader);
+  while(!readers){
+    if (c_wait(&noreader, &mutex)) {
+      writing--;
+      rc= -EINTR;
+      goto epilog;
+      }
+
+  }
 
 epilog:
   m_unlock(&mutex);
