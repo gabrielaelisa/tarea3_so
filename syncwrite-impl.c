@@ -111,7 +111,6 @@ int syncwrite_open(struct inode *inode, struct file *filp) {
 
   // escritura
   if (filp->f_mode & FMODE_WRITE) {
-    int rc;
     writing+= 1;
     printk("<1>open for write successful\n");
   }
@@ -181,24 +180,55 @@ epilog:
 ssize_t syncwrite_write( struct file *filp, const char *buf,
                       size_t count, loff_t *f_pos) {
   
-  // minor number
-  //int minor= iminor(filp->f_path.dentry->d_inode);
+  //minor number
+  int minor= iminor(filp->f_path.dentry->d_inode);
   ssize_t rc;
   loff_t last;
-
   m_lock(&mutex);
 
-  last= size + count;
-  if (last>MAX_SIZE) {
-    count -= last-MAX_SIZE;
-  }
-  printk("<1>write %d bytes at %d\n", (int)count, (int)*f_pos);
+  // priority write 
+  if(minor==1){
+    // creating auxiliary buffer
+    char * aux_buffer = kmalloc(size+1, GFP_KERNEL);
+    //error during creation
+    if (aux_buffer==NULL) {
+      writing--;
+      printk("could not make buffer");
+      kfree(aux_buffer);
+      return -ENOMEM;
+    }
+    //copy current values
+    memcpy(aux_buffer,syncwrite_buffer, sizeof(size));
+    
+    if (copy_from_user(syncwrite_buffer, buf, count)!=0) {
+      writing--;
+      rc= -EFAULT;
+      goto epilog;
+    }
 
-  /* Transfiriendo datos desde el espacio del usuario */
-  if (copy_from_user(syncwrite_buffer+size, buf, count)!=0) {
-    /* el valor de buf es una direccion invalida */
-    rc= -EFAULT;
-    goto epilog;
+    memcpy(syncwrite_buffer+count, aux_buffer, sizeof(size));
+    kfree(aux_buffer);
+
+  }
+
+
+  // no priority
+  else if(minor==0){
+
+    last= size + count;
+    if (last>MAX_SIZE) {
+      count -= last-MAX_SIZE;
+    }
+    printk("<1>write %d bytes at %d\n", (int)count, (int)*f_pos);
+
+    /* Transfiriendo datos desde el espacio del usuario */
+    if (copy_from_user(syncwrite_buffer+size, buf, count)!=0) {
+      /* el valor de buf es una direccion invalida */
+      writing--;
+      rc= -EFAULT;
+      goto epilog;
+    }
+
   }
   size+=count;
   *f_pos += count;
@@ -208,12 +238,13 @@ ssize_t syncwrite_write( struct file *filp, const char *buf,
       writing--;
       rc= -EINTR;
       goto epilog;
-      }
-
+    }
   }
 
-epilog:
-  m_unlock(&mutex);
-  return rc;
-}
+ 
+
+  epilog:
+    m_unlock(&mutex);
+    return rc;
+  }
 
