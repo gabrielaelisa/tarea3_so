@@ -7,6 +7,9 @@
 #include <linux/fs.h> /* everything... */
 #include <linux/errno.h> /* error codes */
 #include <linux/types.h> /* size_t */
+#include<linux/types.h>
+#include<linux/cdev.h>
+#include<linux/device.h>
 #include <linux/proc_fs.h>
 #include <linux/fcntl.h> /* O_ACCMODE */
 #include <linux/uaccess.h> /* copy_from/to_user */
@@ -25,6 +28,8 @@ int syncwrite_init(void);
 
 
 
+dev_t syncwriteDev;
+struct cdev syncwriteCdev;
 /* Structure that declares the usual file */
 /* access functions */
 struct file_operations syncwrite_fops = {
@@ -37,7 +42,6 @@ struct file_operations syncwrite_fops = {
 /* Declaration of the init and exit functions */
 module_init(syncwrite_init);
 module_exit(syncwrite_exit);
-
 /*** El driver para lecturas sincronas *************************************/
 
 #define TRUE 1
@@ -49,6 +53,7 @@ int syncwrite_major = 61;     /* Major number */
 
 /* Buffer to store data */
 #define MAX_SIZE 8192
+#define MAXDEVICES 2
 
 // variables globales
 
@@ -62,12 +67,13 @@ static KMutex mutex;
 // todos los escritores esperan un lector
 static KCondition noreader;
 
+/*
 int syncwrite_init(void) {
   int rc;
 
-  /* Registering device */
+  /* Registering device 
   rc = register_chrdev(syncwrite_major, "syncwrite", &syncwrite_fops);
-  if (rc < 0) {
+  if (rc > MAXDEVICES) {
     printk(
       "<1>syncwrite: cannot obtain major number %d\n", syncwrite_major);
     return rc;
@@ -79,7 +85,7 @@ int syncwrite_init(void) {
   m_init(&mutex);
   c_init(&noreader);
 
-  /* Allocating syncwrite_buffer */
+  /* Allocating syncwrite_buffer 
   syncwrite_buffer = kmalloc(MAX_SIZE, GFP_KERNEL);
   if (syncwrite_buffer==NULL) {
     syncwrite_exit();
@@ -88,6 +94,35 @@ int syncwrite_init(void) {
   memset(syncwrite_buffer, 0, MAX_SIZE);
 
   printk("<1>Inserting syncwrite module\n");
+  return 0;
+}
+*/
+
+
+/*module init*/
+int syncwrite_init(void)
+{
+  int status;
+  /*allocate one major and 2 minor numbers*/
+  status=alloc_chrdev_region(&syncwriteDev,0,2,"syncwrite");
+  if(0!=status)
+  {
+    printk(KERN_ALERT"alloc_chrdev_region failed\n");
+    return status;
+  }
+  else
+  {
+    /*init one module for 2 devices*/
+    cdev_init(&syncwriteCdev,&syncwrite_fops);
+    status=cdev_add(&syncwriteCdev,syncwriteDev,2);
+    if(0!=status)
+    {
+      printk(KERN_ALERT"cdev_add failed \n");
+      syncwrite_exit();
+      return status;
+    }
+  }
+  printk(KERN_ALERT"inserted syncwrite (%d,%d)\n",MAJOR(syncwriteDev),MINOR(syncwriteDev));
   return 0;
 }
 
