@@ -117,9 +117,11 @@ int syncwrite_open(struct inode *inode, struct file *filp) {
 
   // lectura
   else if (filp->f_mode & FMODE_READ) {
+    printk("<1> here looping\n");
     if(writing==0)
     {
-      rc= -EINTR;
+      printk("<1>no writers\n");
+      //rc= -EINTR;
       goto epilog;
     }
 
@@ -138,10 +140,11 @@ int syncwrite_release(struct inode *inode, struct file *filp) {
   m_lock(&mutex);
 
   if (filp->f_mode & FMODE_WRITE) {
-    writing-=1;
+    writing--;
     printk("<1>close for write successful\n");
   }
   else if (filp->f_mode & FMODE_READ) {
+    size=0;
     readers= FALSE;
     printk("<1>close for read (readers remaining=%d)\n", readers);
   }
@@ -177,6 +180,9 @@ epilog:
   return rc;
 }
 
+
+
+
 ssize_t syncwrite_write( struct file *filp, const char *buf,
                       size_t count, loff_t *f_pos) {
   
@@ -185,6 +191,11 @@ ssize_t syncwrite_write( struct file *filp, const char *buf,
   ssize_t rc;
   loff_t last;
   m_lock(&mutex);
+
+  last= size + count;
+  if (last>MAX_SIZE) {
+      count -= last-MAX_SIZE;
+    }
 
   // priority write 
   if(minor==1){
@@ -215,15 +226,11 @@ ssize_t syncwrite_write( struct file *filp, const char *buf,
   // no priority
   else if(minor==0){
 
-    last= size + count;
-    if (last>MAX_SIZE) {
-      count -= last-MAX_SIZE;
-    }
     printk("<1>write %d bytes at %d\n", (int)count, (int)*f_pos);
 
-    /* Transfiriendo datos desde el espacio del usuario */
+    /* Transfiriendo datos desde el espacio del usuario*/ 
     if (copy_from_user(syncwrite_buffer+size, buf, count)!=0) {
-      /* el valor de buf es una direccion invalida */
+      /* el valor de buf es una direccion invalida*/
       writing--;
       rc= -EFAULT;
       goto epilog;
@@ -243,8 +250,48 @@ ssize_t syncwrite_write( struct file *filp, const char *buf,
 
  
 
-  epilog:
+epilog:
     m_unlock(&mutex);
     return rc;
   }
 
+
+
+
+/*/----------------------------------------------------------
+ssize_t syncwrite_write( struct file *filp, const char *buf,
+                      size_t count, loff_t *f_pos) {
+  
+  // minor number
+  //int minor= iminor(filp->f_path.dentry->d_inode);
+  ssize_t rc;
+  loff_t last;
+
+  m_lock(&mutex);
+
+  last= size + count;
+  if (last>MAX_SIZE) {
+    count -= last-MAX_SIZE;
+  }
+  printk("<1>write %d bytes at %d\n", (int)count, (int)*f_pos);
+
+  if (copy_from_user(syncwrite_buffer+size, buf, count)!=0) {
+    rc= -EFAULT;
+    goto epilog;
+  }
+  size+=count;
+  rc= count;
+  while(!readers){
+    if (c_wait(&noreader, &mutex)) {
+      writing--;
+      rc= -EINTR;
+      goto epilog;
+      }
+
+  }
+
+epilog:
+  m_unlock(&mutex);
+  return rc;
+}
+*/
